@@ -1,0 +1,12 @@
+{
+ "tp": 44,
+ "fp": 0,
+ "fn": 0,
+ "precision": 1.0,
+ "recall": 1.0,
+ "f1": 1.0,
+ "kind_accuracy": 1.0,
+ "cell_accuracy": 1.0,
+ "delta_t_mae": 0.2366,
+ "next_door": 0
+}

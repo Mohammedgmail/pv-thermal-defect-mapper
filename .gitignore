@@ -1,0 +1,15 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.pytest_cache/
+.ruff_cache/
+.venv/
+venv/
+.vscode/
+.idea/
+.DS_Store
+# surveys and results you generate (the example in examples/june-noon/results is kept)
+/survey/
+/results/
