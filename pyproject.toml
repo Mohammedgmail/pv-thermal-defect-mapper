@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "pvdefect"
-version = "0.1.0"
+version = "0.2.0"
 description = "Find hot spots in drone thermal images of a solar plant and map each one to the exact module and cell, using the camera poses and plant model of a pvmission flight plan"
 readme = "README.md"
 license = "MIT"
@@ -47,4 +47,4 @@ target-version = "py310"
 select = ["E", "F", "W", "I", "B", "UP", "NPY"]
 
 [tool.ruff.lint.flake8-bugbear]
-extend-immutable-calls = ["pvdefect.mapper.Settings", "pvdefect.simulate.Weather", "pvdefect.simulate.Optics"]
+extend-immutable-calls = ["pvdefect.mapper.Settings", "pvdefect.simulate.Weather", "pvdefect.simulate.Optics", "pvdefect.simulate.ModuleThermal", "pvmission.planner.Drone"]

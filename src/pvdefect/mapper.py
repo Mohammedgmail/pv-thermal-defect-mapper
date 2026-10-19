@@ -31,7 +31,7 @@ from pvmission.sun import solar_position, sun_vector
 from scipy import ndimage
 
 from .camera import project
-from .scene import CELLS_ACROSS, CELLS_ALONG, FRAME_M, SUBSTRINGS, Module, Pose, Scene
+from .scene import FRAME_M, SUBSTRINGS, Module, Pose, Scene
 
 
 @dataclass(frozen=True)
@@ -85,15 +85,24 @@ def crop_grid(m: Module, res: float) -> tuple[np.ndarray, np.ndarray]:
 
 
 def _hidden(P: np.ndarray, C: np.ndarray, rows) -> np.ndarray:
-    """True where the line of sight from P to the camera C crosses one of ``rows``."""
+    """True where the line of sight from P to the camera C crosses one of ``rows``.
+
+    The points are projected once onto each distinct row orientation (all rows of a plant
+    usually share one), so every further row costs a few scalar-array operations.
+    """
     hit = np.zeros(P.shape[:-1], dtype=bool)
-    v = C - P
+    proj: dict = {}
     for r in rows:
-        n = r.normal
+        n, a, w = r.normal, r.along, r.upslope
+        key = (*np.round(n, 12), *np.round(a, 12))
+        if key not in proj:
+            proj[key] = (P @ n, P @ a, P @ w, C @ n, C @ a, C @ w)
+        pn, pa, pw, cn, ca, cw = proj[key]
         with np.errstate(divide="ignore", invalid="ignore"):
-            t = ((r.center - P) @ n) / (v @ n)
-        X = P + t[..., None] * v - r.center
-        inside = (np.abs(X @ r.along) <= r.length / 2) & (np.abs(X @ r.upslope) <= r.width / 2)
+            t = (r.center @ n - pn) / (cn - pn)
+        xa = pa + t * (ca - pa) - r.center @ a
+        xw = pw + t * (cw - pw) - r.center @ w
+        inside = (np.abs(xa) <= r.length / 2) & (np.abs(xw) <= r.width / 2)
         hit |= (t > 1e-6) & (t < 1 - 1e-6) & inside
     return hit
 
@@ -126,12 +135,8 @@ def module_crop(image: np.ndarray, m: Module, pose: Pose, scene: Scene, res: flo
 
 
 def _cell_of(m: Module, ms: float, mt: float) -> tuple[int, int]:
-    cw = (m.width - 2 * FRAME_M) / CELLS_ACROSS
-    ch = (m.height - 2 * FRAME_M) / CELLS_ALONG
-    return (
-        int(np.clip((mt - FRAME_M) // ch, 0, CELLS_ALONG - 1)),
-        int(np.clip((ms - FRAME_M) // cw, 0, CELLS_ACROSS - 1)),
-    )
+    r, c = m.cell_index(ms, mt)
+    return int(r), int(c)
 
 
 def analyse_crop(
@@ -150,9 +155,8 @@ def analyse_crop(
     med = float(np.median(vals))
     sigma = max(1.4826 * float(np.median(np.abs(vals - med))), 1e-6)
     scale = sigma if relative else 1.0
-    cw = (m.width - 2 * FRAME_M) / CELLS_ACROSS
-    ch = (m.height - 2 * FRAME_M) / CELLS_ALONG
-    band = np.clip(((ms - FRAME_M) // (2 * cw)).astype(int), 0, SUBSTRINGS - 1)
+    cw, ch = m.cell_size
+    band = m.substring_index(ms, mt)
     band_med = np.array(
         [
             np.median(crop[interior & (band == b)]) if (interior & (band == b)).any() else med
@@ -232,8 +236,10 @@ class Mapper:
         rows = self.line_rows.get(pose.line, range(len(self.scene.rows)))
         sun = self._sun(pose.time) if pose.time is not None else None
         views: list[View] = []
+        frame_pose = pose
         for ri in rows:
             row = self.scene.rows[ri]
+            pose = frame_pose.for_row(ri)  # row-wise correction from refinement, if any
             row_views, medians = [], []
             for c in range(1, row.modules_along + 1):
                 for lvl in range(1, row.modules_across + 1):

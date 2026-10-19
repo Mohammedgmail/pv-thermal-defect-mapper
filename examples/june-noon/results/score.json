@@ -7,6 +7,6 @@
  "f1": 1.0,
  "kind_accuracy": 1.0,
  "cell_accuracy": 1.0,
- "delta_t_mae": 0.2366,
+ "delta_t_mae": 0.2375,
  "next_door": 0
 }

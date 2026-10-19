@@ -5,7 +5,7 @@ from .mapper import Finding, Mapper, Settings, load_survey
 from .refine import refine_poses
 from .scene import Module, Pose, Scene
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"
 __all__ = [
     "Finding",
     "Mapper",

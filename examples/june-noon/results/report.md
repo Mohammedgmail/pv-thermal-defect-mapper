@@ -11,7 +11,7 @@
 | hot cells | 6 |
 | hot cell | 16 |
 
-Pose refinement: 20 of 20 passes corrected, median shift 0.18 m at the modules.
+Pose refinement: 20 of 20 passes corrected, median shift 0.19 m at the modules.
 
 ## Against the simulation's ground truth
 
@@ -49,10 +49,10 @@ Precision 1.000, recall 1.000, F1 1.000 (44 found, 0 false, 0 missed). Defect ty
 | R02-C020-1 | hot cells | 11.2 | (2,0) (3,0) (3,1) | 3/3 | 55.049457 | -1.699414 |
 | R15-C088-2 | hot cells | 11.0 | (7,2) (8,2) (8,3) | 3/3 | 55.050292 | -1.700621 |
 | R13-C091-2 | hot cells | 10.7 | (6,0) (7,1) | 3/3 | 55.050166 | -1.700674 |
-| R20-C096-2 | hot cell | 24.6 | (8,3) | 3/3 | 55.050606 | -1.700763 |
+| R20-C096-2 | hot cell | 24.5 | (8,3) | 3/3 | 55.050606 | -1.700763 |
 | R03-C088-1 | hot cell | 23.5 | (6,5) | 3/3 | 55.049520 | -1.700621 |
 | R06-C074-2 | hot cell | 21.5 | (10,5) | 3/3 | 55.049726 | -1.700373 |
-| R19-C095-1 | hot cell | 20.7 | (7,4) | 3/3 | 55.050526 | -1.700745 |
+| R19-C095-1 | hot cell | 20.6 | (7,4) | 3/3 | 55.050526 | -1.700745 |
 | R12-C069-1 | hot cell | 20.3 | (6,3) | 3/3 | 55.050085 | -1.700284 |
 | R10-C035-1 | hot cell | 16.6 | (2,5) | 3/3 | 55.049960 | -1.699681 |
 | R06-C060-2 | hot cell | 15.7 | (11,2) | 3/3 | 55.049726 | -1.700124 |

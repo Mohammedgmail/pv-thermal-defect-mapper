@@ -66,3 +66,25 @@ def test_glare_guard_drops_the_reflection_of_the_sun(defects):
     assert len(no_guard) >= 3
     assert guarded == []
     assert sum(v.reflections for v in views) >= len(no_guard)
+
+
+def test_landscape_rows_render_and_map_to_the_right_cell():
+    """A 4L landscape plant (Gujarat example): substrings run along the row and cells are
+    counted 12 along the row by 6 up the slope."""
+    from pvdefect.simulate import Defect
+
+    from .conftest import ROOT
+
+    scene = Scene.from_mission(ROOT / "examples" / "sites" / "gujarat" / "mission.json")
+    m = scene.module("R03-C020-2")
+    assert not m.portrait and m.grid == (12, 6)
+    defects = [
+        Defect("R03-C020-2", "hot_cell", 12.0, [(4, 9)]),
+        Defect("R03-C030-3", "substring", 5.0, [], 2),
+    ]
+    true = flown_poses(scene, np.random.default_rng(0))
+    twin = ThermalTwin(scene, defects, seed=1)
+    frames = [(twin.render(p), p) for p in true if p.line == 2]
+    found = {f.module_id: f for f in Mapper(scene).run(frames)[0]}
+    assert found["R03-C020-2"].kind == "hot_cell" and found["R03-C020-2"].cells == [(4, 9)]
+    assert found["R03-C030-3"].kind == "substring" and found["R03-C030-3"].substring == 2

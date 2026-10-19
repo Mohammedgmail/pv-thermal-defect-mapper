@@ -1,12 +1,15 @@
 import numpy as np
 import pytest
+from pvmission.plant import Row
 
 from pvdefect.evaluate import score
 from pvdefect.mapper import Mapper, Settings, View, analyse_crop, crop_grid
-from pvdefect.scene import CELLS_ACROSS, CELLS_ALONG, FRAME_M
+from pvdefect.scene import FRAME_M, Module
 from pvdefect.simulate import Defect
 
 RES = 0.03
+# landscape: 10 modules of 2.278 m along the row, 4 of 1.134 m up the slope
+LANDSCAPE = Module(Row(0, np.zeros(3), 22.78, 4.536, 20.0, 180.0, 10, 4), 5, 2)
 
 
 @pytest.fixture
@@ -18,14 +21,20 @@ def synthetic_crop(m, rng, cell=None, band=None, dt=8.0, noise=0.05):
     """Healthy module at 40 C with cool frames, plus a hot cell (row, col) or a warm third."""
     ms, mt = crop_grid(m, RES)
     crop = 40.0 + rng.normal(0, noise, ms.shape)
-    cw, ch = (m.width - 2 * FRAME_M) / CELLS_ACROSS, (m.height - 2 * FRAME_M) / CELLS_ALONG
-    col, row = (ms - FRAME_M) // cw, (mt - FRAME_M) // ch
+    row, col = m.cell_index(ms, mt)
+    inside = (ms > FRAME_M) & (ms < m.width - FRAME_M) & (mt > FRAME_M) & (mt < m.height - FRAME_M)
     if cell is not None:
-        crop[(row == cell[0]) & (col == cell[1])] += dt
+        crop[inside & (row == cell[0]) & (col == cell[1])] += dt
     if band is not None:
-        crop[(col // 2) == band] += dt
-    frame = (ms < FRAME_M) | (ms > m.width - FRAME_M) | (mt < FRAME_M) | (mt > m.height - FRAME_M)
-    return np.where(frame, 34.0, crop)
+        crop[inside & (m.substring_index(ms, mt) == band)] += dt
+    return np.where(inside, crop, 34.0)
+
+
+def test_portrait_and_landscape_grids(module):
+    assert module.portrait and module.grid == (6, 12)
+    assert not LANDSCAPE.portrait and LANDSCAPE.grid == (12, 6)
+    # landscape substrings run along the row: they split the module bottom to top
+    assert LANDSCAPE.substring_index(1.0, [0.1, 0.5, 1.0]).tolist() == [0, 1, 2]
 
 
 @pytest.mark.parametrize("cell", [(0, 0), (5, 3), (11, 5), (7, 1)])
@@ -38,11 +47,19 @@ def test_hot_cell_is_located_to_its_cell(module, cell):
     assert a["blobs"][0]["peak"] == pytest.approx(8.0, abs=0.3)
 
 
+@pytest.mark.parametrize("cell", [(0, 0), (2, 7), (5, 11)])
+def test_hot_cell_in_a_landscape_module(cell):
+    crop = synthetic_crop(LANDSCAPE, np.random.default_rng(5), cell=cell)
+    a = analyse_crop(crop, LANDSCAPE, Settings(), RES)
+    assert [b["cells"] for b in a["blobs"]] == [[cell]]
+
+
+@pytest.mark.parametrize("m", ["portrait", "landscape"])
 @pytest.mark.parametrize("band", [0, 1, 2])
-def test_warm_third_is_a_bypass_diode_substring(module, band):
-    a = analyse_crop(
-        synthetic_crop(module, np.random.default_rng(2), band=band, dt=4.0), module, Settings(), RES
-    )
+def test_warm_third_is_a_bypass_diode_substring(module, m, band):
+    mod = module if m == "portrait" else LANDSCAPE
+    crop = synthetic_crop(mod, np.random.default_rng(2), band=band, dt=4.0)
+    a = analyse_crop(crop, mod, Settings(), RES)
     assert a["substring"] == band
     assert a["band_dt"] == pytest.approx(4.0, abs=0.2)
     assert a["blobs"] == []

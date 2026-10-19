@@ -9,9 +9,10 @@ def test_simulate_then_map_with_refinement(tmp_path, capsys):
     survey, out = tmp_path / "survey", tmp_path / "results"
     main(["simulate", str(NOON), "--out", str(survey), "--lines", "3", "--errors", "gnss"])
     assert len(list((survey / "frames").glob("*.tiff"))) == 25
-    main(["map", str(survey), "--mission", str(NOON), "--out", str(out), "--refine"])
+    main(["map", str(survey), "--mission", str(NOON), "--out", str(out), "--refine", "--reinspect"])
     text = capsys.readouterr().out
     assert "Pose refinement: 1 of 1 passes corrected" in text
+    assert "Re-inspection: 0 module(s)" in text  # nothing left uncertain
     for name in (
         "findings.csv",
         "findings.geojson",
@@ -19,6 +20,8 @@ def test_simulate_then_map_with_refinement(tmp_path, capsys):
         "gallery.png",
         "refine.json",
         "score.json",
+        "reinspect.waypoints",
+        "reinspect.json",
     ):
         assert (out / name).exists(), name
     score = json.loads((out / "score.json").read_text())

@@ -3,6 +3,7 @@
 pvdefect simulate examples/june-noon/mission.json --out survey --lines 3,4   # render a survey
 pvdefect map survey --mission examples/june-noon/mission.json --out results  # find and map defects
 pvdefect map survey --mission examples/june-noon/mission.json --refine       # ... fixing GNSS poses
+pvdefect map survey --mission ... --refine --reinspect                      # + plan a re-flight
 pvdefect raptor path/to/InfraredSolarModules                                 # real-data check
 """
 
@@ -104,7 +105,55 @@ def cmd_map(a: argparse.Namespace) -> None:
     out = Path(a.out)
     paths = write_outputs(out, scene, findings, views, frames, refine_report, sc)
     print((out / "report.md").read_text().split("## Findings")[0].strip())
+    if a.reinspect:
+        paths += _reinspect(scene, findings, views, frames, out, a.reinspect_at)
     print("\nwrote " + ", ".join(str(p) for p in paths))
+
+
+def _reinspect(scene, findings, views, frames, out: Path, at: str | None) -> list[Path]:
+    """Plan a re-inspection flight for what the survey left uncertain."""
+    import pandas as pd
+
+    from . import reinspect as RI
+
+    todo = RI.candidates(findings, views)
+    last = max(p.time for _, p in frames)
+    start = last + pd.Timedelta(minutes=5)
+    if at:
+        hh, mm = (int(x) for x in at.split(":"))
+        start = last.replace(hour=hh, minute=mm, second=0, microsecond=0, nanosecond=0)
+    m = scene.extras["mission"]
+    hlat, hlon, _ = m["home_lla"]
+    home = np.array([*scene.frame.to_local(hlat, hlon), 0.0])
+    plan = RI.plan(scene, todo, start, home)
+    wp = out / "reinspect.waypoints"
+    RI.write_waypoints(wp, scene, plan, home)
+    info = {
+        "start": str(start),
+        "flight_minutes": round(plan.flight_s / 60, 2),
+        "viewpoints": [
+            {
+                "module": v.module_id,
+                "reason": v.reason,
+                "enu": [round(float(x), 2) for x in v.position],
+                "yaw_deg": round(v.yaw_deg, 1),
+                "gimbal_pitch_deg": round(v.pitch_deg, 1),
+                "view_deg": round(v.view_deg, 1),
+                "glare_deg": round(v.glare_deg, 1),
+                "gsd_cm": round(v.gsd_cm, 2),
+            }
+            for v in plan.viewpoints
+        ],
+        "unreachable": [c.__dict__ for c in plan.unreachable],
+    }
+    js = out / "reinspect.json"
+    js.write_text(json.dumps(info, indent=1))
+    print(
+        f"\nRe-inspection: {len(plan.viewpoints)} module(s) to look at again "
+        f"({', '.join(sorted({v.reason for v in plan.viewpoints})) or 'none'}), "
+        f"{plan.flight_s / 60:.1f} min flight from {start:%H:%M}"
+    )
+    return [wp, js]
 
 
 def cmd_raptor(a: argparse.Namespace) -> None:
@@ -155,6 +204,14 @@ def main(argv: list[str] | None = None) -> None:
         "--guard", type=float, default=Settings.reflection_guard_deg, help="reflection guard, deg"
     )
     m.add_argument("--min-views", type=int, default=Settings.min_views)
+    m.add_argument(
+        "--reinspect",
+        action="store_true",
+        help="also plan a re-inspection flight (ArduPilot mission) for uncertain modules",
+    )
+    m.add_argument(
+        "--reinspect-at", help="local time HH:MM of the re-inspection (default: 5 min after)"
+    )
     m.set_defaults(func=cmd_map)
 
     r = sub.add_parser(

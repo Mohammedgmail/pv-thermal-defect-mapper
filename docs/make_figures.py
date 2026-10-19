@@ -213,7 +213,8 @@ def pose_figure(scene, defects):
     from pvdefect.mapper import Finding
 
     best = best_views([Finding(d.module_id, d.kind, d.delta_t, 2, 2) for d in truth], views)
-    res = json.loads((RESULTS / "pose_errors.json").read_text())["runs"]
+    res = json.loads((RESULTS / "main.json").read_text())["runs"]
+    n_flights = len({r["seed"] for r in res if r["errors"] == "GNSS 1.5 m"})
 
     fig = plt.figure(figsize=(13.2, 5.6), facecolor=SURFACE)
     for j, d in enumerate(truth):
@@ -250,17 +251,21 @@ def pose_figure(scene, defects):
         ax = fig.add_axes([0.52 + p * 0.25, 0.22, 0.2, 0.6])
         style(ax)
         x = np.arange(len(names))
-        for o, (ref, colour, lab) in enumerate(
-            ((False, "#b5b3ad", "logged poses"), (True, BLUE, "refined poses"))
-        ):
+        methods = (
+            ("logged", "#b5b3ad", "logged poses"),
+            ("pnp", ORANGE, "PnP baseline"),
+            ("ours", BLUE, "refined (ours)"),
+        )
+        for o, (method, colour, lab) in enumerate(methods):
             vals = [
-                [r[metric] for r in res if r["errors"] == nm and r["refine"] == ref] for nm in names
+                [r[metric] for r in res if r["errors"] == nm and r["method"] == method]
+                for nm in names
             ]
-            mean = [np.nanmean(v) for v in vals]
-            lo = [m - np.nanmin(v) for m, v in zip(mean, vals, strict=True)]
-            hi = [np.nanmax(v) - m for m, v in zip(mean, vals, strict=True)]
-            ax.bar(x + (o - 0.5) * 0.38, mean, 0.36, color=colour, label=lab)
-            ax.errorbar(x + (o - 0.5) * 0.38, mean, [lo, hi], fmt="none", ecolor=INK_2, lw=0.8)
+            mean = [np.nanmean(v) if np.isfinite(v).any() else 0.0 for v in vals]
+            lo = [m - np.nanmin(v, initial=m) for m, v in zip(mean, vals, strict=True)]
+            hi = [np.nanmax(v, initial=m) - m for m, v in zip(mean, vals, strict=True)]
+            ax.bar(x + (o - 1) * 0.27, mean, 0.25, color=colour, label=lab)
+            ax.errorbar(x + (o - 1) * 0.27, mean, [lo, hi], fmt="none", ecolor=INK_2, lw=0.8)
         ax.set_xticks(x, labels, fontsize=7.5, color=INK_2)
         ax.set_ylim(0, 1.05)
         ax.set_title(ylab, loc="left", fontsize=9.5, color=INK, fontweight="bold")
@@ -270,10 +275,15 @@ def pose_figure(scene, defects):
                 fontsize=8.5,
                 loc="upper center",
                 bbox_to_anchor=(1.12, -0.17),
-                ncol=2,
+                ncol=3,
             )
     fig.text(
-        0.52, 0.955, "Whole plant, 3 flights per case", fontsize=10.5, fontweight="bold", color=INK
+        0.52,
+        0.955,
+        f"Whole plant, {n_flights} flights per case (bars: mean, whiskers: range)",
+        fontsize=10.5,
+        fontweight="bold",
+        color=INK,
     )
     fig.savefig(DOCS / "pose_refinement.png", dpi=140, facecolor=SURFACE)
     plt.close(fig)

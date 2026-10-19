@@ -7,7 +7,10 @@ a pose error). Type, cell and temperature accuracy are measured on true positive
 
 from __future__ import annotations
 
+import hashlib
+import multiprocessing
 import tempfile
+from concurrent.futures import ProcessPoolExecutor
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
@@ -37,8 +40,8 @@ class Score:
 
 def _neighbours(mid: str) -> set[str]:
     r, c, lvl = mid.split("-")
-    col = int(c[1:])
-    out = {f"{r}-C{col + d:03d}-{lv}" for d in (-1, 0, 1) for lv in ("1", "2")}
+    col, level = int(c[1:]), int(lvl)
+    out = {f"{r}-C{col + d:03d}-{lv}" for d in (-1, 0, 1) for lv in (level - 1, level, level + 1)}
     out.discard(mid)
     return out
 
@@ -76,8 +79,27 @@ def score(findings: list[Finding], truth: list[Defect]) -> Score:
     )
 
 
+_RENDER: dict = {}  # shared with forked render workers
+
+
+def _render_some(job) -> None:
+    path, shape, items = job
+    twin, true, speeds = _RENDER["twin"], _RENDER["true"], _RENDER["speeds"]
+    out = np.memmap(path, np.float32, "r+", shape=shape)
+    for k, i in items:
+        # sensor noise drawn per frame, so it does not depend on which worker renders it
+        twin.rng = np.random.default_rng([_RENDER["seed"], i])
+        out[k] = twin.render(true[i], speed_mps=speeds.get(true[i].line, 0.0))
+    out.flush()
+
+
 class Survey:
-    """A flight rendered once (frames kept on disk), mapped as often as needed."""
+    """A flight rendered once (frames kept on disk), mapped as often as needed.
+
+    ``workers`` renders in that many forked processes. ``cache`` is a folder where the
+    rendered frames are kept between runs, under a key made of everything that changes them
+    (plan, poses, defects, seed, speeds, twin settings and the renderer's own source code).
+    """
 
     def __init__(
         self,
@@ -87,6 +109,8 @@ class Survey:
         speeds: dict[int, float] | None = None,
         frames: list[int] | None = None,
         twin_kwargs: dict | None = None,
+        workers: int = 1,
+        cache: Path | None = None,
     ):
         self.scene, self.defects, self.seed = scene, defects, seed
         rng = np.random.default_rng(seed)
@@ -94,15 +118,47 @@ class Survey:
         self.index = list(range(len(scene.poses))) if frames is None else list(frames)
         self.twin = ThermalTwin(scene, defects, seed=seed, **(twin_kwargs or {}))
         cam = scene.camera
-        self._dir = tempfile.TemporaryDirectory(prefix="pvdefect_")
-        path = Path(self._dir.name) / "frames.f32"
-        self.images = np.memmap(
-            path, np.float32, "w+", shape=(len(self.index), cam.height_px, cam.width_px)
-        )
-        for k, i in enumerate(self.index):
-            p = self.true[i]
-            self.images[k] = self.twin.render(p, speed_mps=(speeds or {}).get(p.line, 0.0))
-        self.images.flush()
+        shape = (len(self.index), cam.height_px, cam.width_px)
+        speeds = speeds or {}
+        if cache is not None:
+            from . import simulate
+
+            key = hashlib.sha256(
+                repr(
+                    (
+                        [(p.position.round(6).tolist(), p.yaw_deg, p.pitch_deg, str(p.time))
+                         for p in scene.poses],
+                        [(r.center.tolist(), r.length, r.width, r.tilt, r.azimuth,
+                          r.modules_along, r.modules_across) for r in scene.rows],
+                        scene.frame, scene.camera, defects, seed, sorted(speeds.items()),
+                        self.index, sorted((twin_kwargs or {}).items()),
+                        Path(simulate.__file__).read_bytes(),
+                    )
+                ).encode()
+            ).hexdigest()[:20]  # fmt: skip
+            cache = Path(cache)
+            cache.mkdir(parents=True, exist_ok=True)
+            path = cache / f"survey_{key}.f32"
+            if path.exists() and path.stat().st_size == 4 * int(np.prod(shape)):
+                self.images = np.memmap(path, np.float32, "r", shape=shape)
+                return
+            tmp = path.with_suffix(".part")
+        else:
+            self._dir = tempfile.TemporaryDirectory(prefix="pvdefect_")
+            tmp = path = Path(self._dir.name) / "frames.f32"
+        np.memmap(tmp, np.float32, "w+", shape=shape).flush()
+        items = list(enumerate(self.index))
+        _RENDER.update(twin=self.twin, true=self.true, speeds=speeds, seed=seed)
+        if workers > 1:
+            chunks = [(tmp, shape, items[w::workers]) for w in range(workers)]
+            ctx = multiprocessing.get_context("fork")
+            with ProcessPoolExecutor(workers, mp_context=ctx) as ex:
+                list(ex.map(_render_some, chunks))
+        else:
+            _render_some((tmp, shape, items))
+        if tmp != path:
+            tmp.rename(path)
+        self.images = np.memmap(path, np.float32, "r", shape=shape)
 
     def logged(self, errors: PoseErrors, seed: int = 0) -> list[Pose]:
         poses = logged_poses(self.true, errors, np.random.default_rng(10_000 + seed))

@@ -37,9 +37,10 @@ from pvmission.sun import clear_sky_poa, sun_vector
 from scipy import ndimage
 
 from .camera import pixel_grid, rays
-from .scene import CELLS_ACROSS, CELLS_ALONG, FRAME_M, Module, Pose, Scene
+from .scene import FRAME_M, Module, Pose, Scene
 
 KINDS = ("hot_cell", "hot_cells", "substring", "offline", "string")
+NUISANCES = ("soiling",)  # warm patterns that are not module faults (rendered, never scored)
 
 
 @dataclass
@@ -68,6 +69,19 @@ class Optics:
 
 
 @dataclass(frozen=True)
+class ModuleThermal:
+    """Temperature pattern of a healthy module (the defaults are a clean module).
+
+    Real modules also show cell-to-cell mismatch of up to about a kelvin, a warm patch over
+    the junction box and cooler edges next to the frame; the stress tests turn these up.
+    """
+
+    cell_sigma_k: float = 0.25  # cell-to-cell scatter (standard deviation)
+    jbox_k: float = 0.0  # warm patch over the junction box (behind the top of the module)
+    edge_k: float = 0.0  # change within a few cm of the frame (negative: cooler)
+
+
+@dataclass(frozen=True)
 class PoseErrors:
     """Logged pose minus true pose: a per-flight bias plus independent per-image jitter.
 
@@ -85,6 +99,7 @@ class PoseErrors:
 
 RTK = PoseErrors()
 GNSS = PoseErrors(position_bias_m=1.5, position_jitter_m=0.15)
+JITTER_ONLY = PoseErrors(0.0, 0.02, 0.0, 0.1, 0.0, 0.1)  # per-image noise of a good RTK log
 
 
 def random_defects(scene: Scene, rng: np.random.Generator, counts=None) -> list[Defect]:
@@ -98,7 +113,7 @@ def random_defects(scene: Scene, rng: np.random.Generator, counts=None) -> list[
         return all(
             f"R{m.row.index + 1:02d}-C{m.column + d:03d}-{lv}" not in taken
             for d in (-1, 0, 1)
-            for lv in (1, 2)
+            for lv in (m.level - 1, m.level, m.level + 1)
         )
 
     def pick() -> Module:
@@ -110,11 +125,13 @@ def random_defects(scene: Scene, rng: np.random.Generator, counts=None) -> list[
 
     for _ in range(counts["hot_cell"]):
         m = pick()
-        cell = (int(rng.integers(CELLS_ALONG)), int(rng.integers(CELLS_ACROSS)))
+        n_s, n_t = m.grid
+        cell = (int(rng.integers(n_t)), int(rng.integers(n_s)))
         out.append(Defect(m.id, "hot_cell", float(rng.uniform(6, 25)), [cell]))
     for _ in range(counts["hot_cells"]):
         m = pick()
-        r, c = int(rng.integers(1, CELLS_ALONG - 1)), int(rng.integers(0, CELLS_ACROSS - 1))
+        n_s, n_t = m.grid
+        r, c = int(rng.integers(1, n_t - 1)), int(rng.integers(0, n_s - 1))
         cells = [(r, c), (r + 1, c + 1)] if rng.random() < 0.5 else [(r, c), (r - 1, c), (r, c + 1)]
         out.append(Defect(m.id, "hot_cells", float(rng.uniform(6, 20)), cells))
     for _ in range(counts["substring"]):
@@ -147,8 +164,9 @@ class ThermalTwin:
         weather: Weather = Weather(),
         optics: Optics = Optics(),
         seed: int = 0,
+        thermal: ModuleThermal = ModuleThermal(),
     ):
-        self.scene, self.weather, self.optics = scene, weather, optics
+        self.scene, self.weather, self.optics, self.thermal = scene, weather, optics, thermal
         self.defects = {d.module_id: d for d in defects}
         self.rng = np.random.default_rng(seed)
         self.plant = Plant(scene.name, scene.frame, scene.rows, scene.timezone)
@@ -176,22 +194,29 @@ class ThermalTwin:
             "t_ground_shade": self.weather.air_c + 1.0,
         }
 
-    def _cell_offsets(self, module_id: str) -> np.ndarray:
-        if module_id not in self._cells:
-            rng = np.random.default_rng(_seed(module_id))
-            self._cells[module_id] = rng.normal(0, 0.25, (CELLS_ALONG, CELLS_ACROSS))
-        return self._cells[module_id]
+    def _cell_offsets(self, module: Module) -> np.ndarray:
+        if module.id not in self._cells:
+            n_s, n_t = module.grid
+            rng = np.random.default_rng(_seed(module.id))
+            self._cells[module.id] = rng.normal(0, 1.0, (n_t, n_s)) * self.thermal.cell_sigma_k
+        return self._cells[module.id]
 
-    def _defect_dt(self, d: Defect, ms, mt, w, h) -> np.ndarray:
-        cw, ch = (w - 2 * FRAME_M) / CELLS_ACROSS, (h - 2 * FRAME_M) / CELLS_ALONG
+    def _defect_dt(self, d: Defect, ms, mt, module: Module) -> np.ndarray:
+        cw, ch = module.cell_size
         x, y = ms - FRAME_M, mt - FRAME_M
         if d.kind in ("offline", "string"):
             return np.full_like(ms, d.delta_t)
-        if d.kind == "substring":
-            c0 = d.substring * 2 * cw
-            inside = (
-                1 / (1 + np.exp(-(x - c0) / 0.02)) * (1 / (1 + np.exp((x - c0 - 2 * cw) / 0.02)))
-            )
+        if d.kind == "soiling":  # dirt along the lower edge shades the bottom cells: they warm
+            rng = np.random.default_rng(_seed(module.id + "/soiling"))
+            height = 0.12 + 0.18 * rng.random()
+            waves, phase = rng.uniform(1.5, 4.0), rng.uniform(0, 2 * np.pi)
+            along = 0.6 + 0.4 * np.sin(2 * np.pi * waves * x / module.width + phase)
+            return d.delta_t * along / (1 + np.exp((y - height) / 0.03))
+        if d.kind == "substring":  # two cells wide, along the long side
+            u, pitch = (x, 2 * cw) if module.portrait else (y, 2 * ch)
+            c0 = d.substring * pitch
+            rise, fall = np.exp(-(u - c0) / 0.02), np.exp((u - c0 - pitch) / 0.02)
+            inside = 1 / (1 + rise) * (1 / (1 + fall))
             return d.delta_t * inside
         out = np.zeros_like(ms)
         for r, c in d.cells:  # a hot cell plus heat spreading into its neighbours
@@ -199,6 +224,26 @@ class ThermalTwin:
             core = np.exp(-(((x - xc) / (0.55 * cw)) ** 4) - ((y - yc) / (0.55 * ch)) ** 4)
             tail = np.exp(-((x - xc) ** 2 + (y - yc) ** 2) / (2 * (1.2 * cw) ** 2))
             out = np.maximum(out, d.delta_t * (0.8 * core + 0.2 * tail))
+        return out
+
+    def _pattern(self, ms, mt, module: Module) -> np.ndarray:
+        """Junction-box patch and edge cooling of a healthy module."""
+        th = self.thermal
+        out = np.zeros_like(ms)
+        if th.jbox_k:  # behind the top of the module, centred across its width
+            w, h = module.width, module.height
+            cx, cy = (w / 2, h - 0.18) if module.portrait else (w - 0.18, h / 2)
+            out += th.jbox_k * np.exp(-((ms - cx) ** 2 + (mt - cy) ** 2) / (2 * 0.08**2))
+        if th.edge_k:
+            d = np.minimum.reduce(
+                [
+                    ms - FRAME_M,
+                    module.width - FRAME_M - ms,
+                    mt - FRAME_M,
+                    module.height - FRAME_M - mt,
+                ]
+            )
+            out += th.edge_k * np.exp(-np.maximum(d, 0) / 0.04)
         return out
 
     def _ground_texture(self, xy: np.ndarray) -> np.ndarray:
@@ -236,13 +281,18 @@ class ThermalTwin:
         hit_row = np.full(len(d), -1)
         S = np.zeros(len(d))
         T = np.zeros(len(d))
+        proj: dict = {}  # ray directions projected once per row orientation (usually one)
         for k, r in enumerate(self.scene.rows):
             n = r.normal
-            denom = d @ n
+            key = (*np.round(n, 12), *np.round(r.along, 12))
+            if key not in proj:
+                proj[key] = (d @ n, d @ r.along, d @ r.upslope)
+            dn, da, du = proj[key]
             with np.errstate(divide="ignore", invalid="ignore"):
-                t = ((r.center - C) @ n) / denom
-            X = C + t[:, None] * d - r.center
-            s, tt = X @ r.along, X @ r.upslope
+                t = ((r.center - C) @ n) / dn
+            c0 = C - r.center
+            s = c0 @ r.along + t * da
+            tt = c0 @ r.upslope + t * du
             hit = (t > 0) & (t < best_t) & (np.abs(s) <= r.length / 2) & (np.abs(tt) <= r.width / 2)
             best_t[hit], hit_row[hit], S[hit], T[hit] = t[hit], k, s[hit], tt[hit]
 
@@ -273,15 +323,14 @@ class ThermalTwin:
             dn = d[sel] @ n
             front = dn < 0
             view = np.degrees(np.arccos(np.clip(-dn, -1, 1)))
-            cw, ch = (w - 2 * FRAME_M) / CELLS_ACROSS, (h - 2 * FRAME_M) / CELLS_ALONG
-            ci = np.clip(((ms - FRAME_M) // cw).astype(int), 0, CELLS_ACROSS - 1)
-            cj = np.clip(((mt - FRAME_M) // ch).astype(int), 0, CELLS_ALONG - 1)
-            for key in np.unique(col * 10 + lvl):
-                m = (col * 10 + lvl) == key
-                mid = f"R{k + 1:02d}-C{key // 10 + 1:03d}-{key % 10 + 1}"
-                temp[m] += self._cell_offsets(mid)[cj[m], ci[m]]
-                if mid in self.defects:
-                    temp[m] += self._defect_dt(self.defects[mid], ms[m], mt[m], w, h)
+            cj, ci = Module(r, 1, 1).cell_index(ms, mt)  # all modules of a row are alike
+            for key in np.unique(col * 100 + lvl):
+                m = (col * 100 + lvl) == key
+                module = Module(r, int(key // 100 + 1), int(key % 100 + 1))
+                temp[m] += self._cell_offsets(module)[cj[m], ci[m]]
+                temp[m] += self._pattern(ms[m], mt[m], module)
+                if module.id in self.defects:
+                    temp[m] += self._defect_dt(self.defects[module.id], ms[m], mt[m], module)
             on_frame = (ms < FRAME_M) | (ms > w - FRAME_M) | (mt < FRAME_M) | (mt > h - FRAME_M)
             temp = np.where(on_frame, cond["t_module"] + o.frame_k, temp)
             temp -= 1.5 * np.clip(view / 60, 0, None) ** 4  # emissivity falls at grazing angles
@@ -336,6 +385,38 @@ def logged_poses(true: list[Pose], errors: PoseErrors, rng: np.random.Generator)
                 bias + jit,
                 bias_yaw + rng.normal(0, e.yaw_jitter_deg),
                 bias_pitch + rng.normal(0, e.pitch_jitter_deg),
+            )
+        )
+    return out
+
+
+def fixed_bias_poses(
+    true: list[Pose],
+    rng: np.random.Generator,
+    horizontal_m: float = 0.0,
+    vertical_m: float = 0.0,
+    yaw_deg: float = 0.0,
+    pitch_deg: float = 0.0,
+    jitter: PoseErrors = JITTER_ONLY,
+) -> list[Pose]:
+    """Logged poses with a bias of exactly the given size (random direction and signs) plus
+    per-image jitter, for sweeps over the size of the error."""
+    a = rng.uniform(0, 2 * np.pi)
+    bias = np.array(
+        [horizontal_m * np.cos(a), horizontal_m * np.sin(a), vertical_m * rng.choice([-1, 1])]
+    )
+    yaw, pitch = yaw_deg * rng.choice([-1, 1]), pitch_deg * rng.choice([-1, 1])
+    j = jitter
+    out = []
+    for p in true:
+        d = np.append(
+            rng.normal(0, j.position_jitter_m, 2), rng.normal(0, 1.5 * j.position_jitter_m)
+        )
+        out.append(
+            p.moved(
+                bias + d,
+                yaw + rng.normal(0, j.yaw_jitter_deg),
+                pitch + rng.normal(0, j.pitch_jitter_deg),
             )
         )
     return out

@@ -14,7 +14,7 @@ import numpy as np  # noqa: E402
 from matplotlib.patches import Rectangle  # noqa: E402
 
 from .mapper import Finding, View, findings_table, module_crop  # noqa: E402
-from .scene import CELLS_ACROSS, CELLS_ALONG, FRAME_M, Pose, Scene  # noqa: E402
+from .scene import FRAME_M, Pose, Scene  # noqa: E402
 
 KIND_LABEL = {
     "hot_cell": "hot cell",
@@ -100,13 +100,12 @@ def gallery(
         if k is None:
             continue
         img, pose = frames[k]
-        crop = module_crop(np.asarray(img), m, pose, scene, res)
+        crop = module_crop(np.asarray(img), m, pose.for_row(m.row.index), scene, res)
         if crop is None:
             continue
         lo, hi = np.nanpercentile(crop, [2, 99.5])
         ax.imshow(crop, cmap="inferno", vmin=lo, vmax=max(hi, lo + 1), interpolation="nearest")
-        cw = (m.width - 2 * FRAME_M) / CELLS_ACROSS / res
-        ch = (m.height - 2 * FRAME_M) / CELLS_ALONG / res
+        cw, ch = (x / res for x in m.cell_size)
         ny = crop.shape[0]
         for r, c in f.cells:  # cell row 0 is at the bottom of the module, crop row 0 at the top
             x0, y1 = FRAME_M / res + c * cw, ny - FRAME_M / res - r * ch

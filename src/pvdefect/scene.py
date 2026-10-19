@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import dataclasses
 import json
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 
 import numpy as np
@@ -17,8 +17,9 @@ import pandas as pd
 from pvmission.camera import Camera
 from pvmission.plant import GeoFrame, Row, direction
 
-CELLS_ACROSS, CELLS_ALONG = 6, 12  # 72-cell module in portrait: 6 columns x 12 rows
-SUBSTRINGS = 3  # bypass-diode substrings, each 2 cell columns wide, along the full length
+CELLS_SHORT, CELLS_LONG = 6, 12  # 72-cell module: 6 cells across its short side, 12 along
+CELLS_ACROSS, CELLS_ALONG = CELLS_SHORT, CELLS_LONG  # portrait: along the row x up the slope
+SUBSTRINGS = 3  # bypass-diode substrings, each 2 cells wide, along the module's long side
 FRAME_M = 0.035  # aluminium frame width
 
 
@@ -32,6 +33,16 @@ class Pose:
     time: pd.Timestamp | None = None
     line: int = -1
     seq: int = -1
+    # per-row corrections from pose refinement: ((row index, (dx, dy, dz)), ...), applied when
+    # this frame is used for the modules of that row (see for_row)
+    row_shifts: tuple = ()
+
+    def for_row(self, row_index: int) -> Pose:
+        """The pose to use for the modules of one row: the row's own correction, if any."""
+        for ri, d in self.row_shifts:
+            if ri == row_index:
+                return replace(self.moved(d), row_shifts=())
+        return self
 
     def axes(self) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
         """Unit vectors of the image: x to the right, y down, z along the optical axis."""
@@ -47,6 +58,7 @@ class Pose:
             self.time,
             self.line,
             self.seq,
+            self.row_shifts,
         )
 
 
@@ -77,6 +89,41 @@ class Module:
             -self.row.length / 2 + (self.column - 1) * self.width,
             -self.row.width / 2 + (self.level - 1) * self.height,
         )
+
+    @property
+    def portrait(self) -> bool:
+        """Long side up the slope (portrait) or along the row (landscape)."""
+        return self.height >= self.width
+
+    @property
+    def grid(self) -> tuple[int, int]:
+        """Number of cells along the row and up the slope: 6 x 12 in portrait, 12 x 6 in
+        landscape."""
+        return (CELLS_SHORT, CELLS_LONG) if self.portrait else (CELLS_LONG, CELLS_SHORT)
+
+    @property
+    def cell_size(self) -> tuple[float, float]:
+        """Cell pitch (m) along the row and up the slope, inside the frame."""
+        n_s, n_t = self.grid
+        return (self.width - 2 * FRAME_M) / n_s, (self.height - 2 * FRAME_M) / n_t
+
+    def cell_index(self, ms, mt):
+        """(cell row from the bottom, cell column along the row) of module coordinates."""
+        n_s, n_t = self.grid
+        cw, ch = self.cell_size
+        r = np.clip(((np.asarray(mt) - FRAME_M) // ch).astype(int), 0, n_t - 1)
+        c = np.clip(((np.asarray(ms) - FRAME_M) // cw).astype(int), 0, n_s - 1)
+        return r, c
+
+    def substring_index(self, ms, mt):
+        """Bypass-diode substring (0-2) of module coordinates: substrings are two cells wide
+        and run along the long side, so they split the short side into thirds."""
+        cw, ch = self.cell_size
+        if self.portrait:
+            x, pitch = np.asarray(ms) - FRAME_M, 2 * cw
+        else:
+            x, pitch = np.asarray(mt) - FRAME_M, 2 * ch
+        return np.clip((x // pitch).astype(int), 0, SUBSTRINGS - 1)
 
     def point(self, ms, mt) -> np.ndarray:
         """World point at ``ms`` metres along and ``mt`` metres up from the lower corner."""
